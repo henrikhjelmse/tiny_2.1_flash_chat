@@ -1,13 +1,13 @@
- ?  """Flask chat for TINY 2.1 (https://github.com/WollyMonjac/Tiny-2.1)
+"""Flask chat for TINY 2.1 (https://github.com/WollyMonjac/Tiny-2.1)
 
- Run:
+Run:
     pip install flask numpy
-     python app.py                      # searches for dos/TINY.BIN or TINY.BIN
-     python app.py --bin path/TINY.BIN --port 5000
+    python app.py                        # looks for dos/TINY.BIN or TINY.BIN
+    python app.py --bin path/TINY.BIN --port 5000
 
- The model is loaded directly from TINY.BIN (version 2) and run with NumPy,
- so PyTorch is not needed. It reads and writes one character at a time
- (ASCII 32..126 plus newline) and understands English only.
+The model is loaded directly from TINY.BIN (version 2) and runs with NumPy,
+so PyTorch is not required. It reads and writes one character at a time
+(ASCII 32 through 126 plus newline) and understands only English.
 """
 import argparse
 import os
@@ -15,17 +15,17 @@ import struct
 import threading
 
 import numpy as np
-from flask import Flask, Response, jsonify, render_template_string, request
+from flask import Flask, Response, jsonify, render_template, request
 
 VOCAB, CTX, MAXQ = 97, 128, 72
 
 
-# ------------------------------------------------- model
+# ------------------------------------------------------------------- model
 class Tiny:
     def __init__(self, path):
         b = open(path, "rb").read()
         if b[:4] != b"TNY2":
-            raise ValueError("Not a TINY.BIN version 2 (missing 'TNY2' in header)")
+            raise ValueError("Not a version 2 TINY.BIN ('TNY2' header is missing)")
         self.D, self.L, self.H, self.HID = struct.unpack_from("<4h", b, 4)
         off = 12
 
@@ -59,7 +59,7 @@ class Tiny:
             self.blocks.append(blk)
         self.nf = gains()
         if off != len(b):
-            raise ValueError("File size does not match header")
+            raise ValueError("The file size does not match the header")
 
     @staticmethod
     def _norm(x, g):
@@ -69,7 +69,7 @@ class Tiny:
         return [([], []) for _ in range(self.L)]
 
     def step(self, tok, pos, cache):
-        """One character in -> logits (scores) for next character."""
+        """Return next-character logits from one input character."""
         D, H = self.D, self.H
         dh = D // H
         x = self.emb[tok] + self.pos[pos]
@@ -91,8 +91,8 @@ class Tiny:
 
 
 def clean(line):
-    """Same cleaning as TINY.EXE: only printable characters, max 72,
-    no trailing spaces, ALL CAPS becomes lowercase."""
+    """Match TINY.EXE cleaning: printable characters, at most 72,
+    no trailing spaces, and uppercase-only input becomes lowercase."""
     q = "".join(c for c in line if 32 <= ord(c) <= 126)[:MAXQ].rstrip()
     if any(c.isupper() for c in q) and not any(c.islower() for c in q):
         q = q.lower()
@@ -105,12 +105,12 @@ def pick(score, creativity, rng):
         return best
     t = creativity / 5.0
     p = np.exp((score - score[best]) / t)
-    p[p < 0.15] = 0.0  # never pick unlikely characters (like in TINY.C)
+    p[p < 0.15] = 0.0  # Never select unlikely characters, as in TINY.C.
     return int(rng.choice(VOCAB, p=p / p.sum()))
 
 
 def answer_stream(model, question, creativity=5):
-    """Generates the answer one character at a time."""
+    """Generate the answer one character at a time."""
     rng = np.random.default_rng()
     cache = model.new_cache()
     p = 0
@@ -118,7 +118,7 @@ def answer_stream(model, question, creativity=5):
     for ch in question:
         score = model.step(ord(ch) - 30, p, cache)
         p += 1
-    score = model.step(1, p, cache)  # newline = end of question
+    score = model.step(1, p, cache)  # Newline marks the end of the question.
     p += 1
     while p < CTX:
         tok = pick(score, creativity, rng)
@@ -129,148 +129,20 @@ def answer_stream(model, question, creativity=5):
         p += 1
 
 
-# ------------------------------------------------- app
+# --------------------------------------------------------------------- app
 app = Flask(__name__)
 MODEL = None
-LOCK = threading.Lock()  # model is small, but one question at a time is fine
-
-PAGE = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TINY 2.1</title>
-<style>
-  :root { color-scheme: dark; --bg:#0b0f14; --panel:#121923; --fg:#d7e3f0;
-          --accent:#39ff9c; --me:#1d2b3d; --dim:#6b7f95; }
-  * { box-sizing: border-box; }
-  body { margin:0; height:100vh; display:flex; flex-direction:column;
-         background:var(--bg); color:var(--fg);
-         font:15px/1.5 ui-monospace, Menlo, Consolas, monospace; }
-  header { padding:12px 16px; border-bottom:1px solid #1c2735;
-           display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
-  header h1 { margin:0; font-size:16px; color:var(--accent); letter-spacing:2px; }
-  header small { color:var(--dim); }
-  .spacer { flex:1; }
-  label { color:var(--dim); font-size:13px; }
-  input[type=range] { vertical-align:middle; accent-color:var(--accent); }
-  #log { flex:1; overflow-y:auto; padding:16px; display:flex;
-         flex-direction:column; gap:10px; }
-  .msg { max-width:min(680px,85%); padding:8px 12px; border-radius:10px;
-         white-space:pre-wrap; word-break:break-word; }
-  .me  { align-self:flex-end; background:var(--me); }
-  .bot { align-self:flex-start; background:var(--panel); border:1px solid #1c2735; }
-  .bot.typing::after { content:"▌"; color:var(--accent); animation:b 1s steps(1) infinite; }
-  @keyframes b { 50% { opacity:0; } }
-  .hint { color:var(--dim); font-size:13px; align-self:center; text-align:center; }
-  .hint span { cursor:pointer; color:var(--accent); margin:0 6px; white-space:nowrap; }
-  form { display:flex; gap:8px; padding:12px 16px; border-top:1px solid #1c2735; }
-  #q { flex:1; padding:10px 12px; border-radius:8px; border:1px solid #1c2735;
-       background:var(--panel); color:var(--fg); font:inherit; }
-  #q:focus { outline:1px solid var(--accent); }
-  button { padding:10px 16px; border-radius:8px; border:0; cursor:pointer;
-           background:var(--accent); color:#04130b; font:inherit; font-weight:700; }
-  button:disabled { opacity:.4; cursor:default; }
-  button.ghost { background:transparent; color:var(--dim); border:1px solid #1c2735;
-                 padding:6px 10px; font-weight:400; }
-</style>
-</head>
-<body>
-<header>
-  <h1>TINY 2.1</h1>
-  <small>367,000 parameters · answers in English</small>
-  <span class="spacer"></span>
-  <label>Creativity <input id="cr" type="range" min="0" max="9" value="5">
-    <b id="crv">5</b></label>
-  <button class="ghost" id="clear" type="button">Clear</button>
-</header>
-
-<div id="log">
-  <div class="hint">TINY knows about ~3,500 facts (countries, elements, animals, basic math…)
-    and confidently makes things up when it doesn't know.<br>Try:
-    <span>what is the capital of peru</span>
-    <span>what is 7 times 8</span>
-    <span>is a whale a fish</span>
-    <span>spell elephant</span>
-    <span>opposite of hot</span>
-  </div>
-</div>
-
-<form id="f" autocomplete="off">
-  <input id="q" maxlength="72" placeholder="Ask a question in English …" autofocus>
-  <button id="go">Send</button>
-</form>
-
-<script>
-const log = document.getElementById('log'), q = document.getElementById('q'),
-      go = document.getElementById('go'), cr = document.getElementById('cr'),
-      crv = document.getElementById('crv');
-const history = [];
-let hi = -1;
-
-cr.oninput = () => crv.textContent = cr.value;
-document.getElementById('clear').onclick = () => {
-  log.querySelectorAll('.msg').forEach(e => e.remove());
-};
-document.querySelectorAll('.hint span').forEach(s =>
-  s.onclick = () => { q.value = s.textContent; q.focus(); });
-
-function add(cls, text) {
-  const d = document.createElement('div');
-  d.className = 'msg ' + cls;
-  d.textContent = text;
-  log.appendChild(d);
-  log.scrollTop = log.scrollHeight;
-  return d;
-}
-
-q.addEventListener('keydown', e => {          // arrow up/down = previous questions
-  if (e.key === 'ArrowUp' && history.length) {
-    hi = Math.min(hi + 1, history.length - 1);
-    q.value = history[history.length - 1 - hi]; e.preventDefault();
-  } else if (e.key === 'ArrowDown') {
-    hi = Math.max(hi - 1, -1);
-    q.value = hi < 0 ? '' : history[history.length - 1 - hi]; e.preventDefault();
-  }
-});
-
-document.getElementById('f').onsubmit = async e => {
-  e.preventDefault();
-  const text = q.value.trim();
-  if (!text) return;
-  history.push(text); hi = -1; q.value = '';
-  add('me', text);
-  const bot = add('bot typing', '');
-  go.disabled = true;
-  try {
-    const r = await fetch('/ask', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({q: text, creativity: +cr.value})
-    });
-    const reader = r.body.getReader(), dec = new TextDecoder();
-    for (;;) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      bot.textContent += dec.decode(value, {stream: true});
-      log.scrollTop = log.scrollHeight;
-    }
-    if (!bot.textContent) bot.textContent = '(no response)';
-  } catch (err) {
-    bot.textContent = 'Error: ' + err;
-  }
-  bot.classList.remove('typing');
-  go.disabled = false; q.focus();
-};
-</script>
-</body>
-</html>
-"""
+LOCK = threading.Lock()  # The model is small, but one request at a time is enough.
 
 
 @app.get("/")
 def index():
-    return render_template_string(PAGE)
+    return render_template("index.html")
+
+
+@app.get("/docs")
+def api_docs():
+    return render_template("api_docs.html")
 
 
 @app.post("/ask")
@@ -307,7 +179,7 @@ def find_bin(explicit):
     ]:
         if p and os.path.isfile(p):
             return p
-    raise SystemExit("Cannot find TINY.BIN – specify path with --bin")
+    raise SystemExit("TINY.BIN was not found; provide its path with --bin")
 
 
 if __name__ == "__main__":

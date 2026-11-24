@@ -1,0 +1,268 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TINY 2.1</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0f14;
+      --panel: #121923;
+      --text: #d7e3f0;
+      --accent: #39ff9c;
+      --user: #1d2b3d;
+      --muted: #6b7f95;
+      --border: #1c2735;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+      color: var(--text);
+      font: 15px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    }
+
+    header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    header h1 {
+      margin: 0;
+      color: var(--accent);
+      font-size: 16px;
+      letter-spacing: 2px;
+    }
+
+    header small, label { color: var(--muted); }
+    header a { color: var(--accent); font-size: 13px; text-decoration: none; }
+    .spacer { flex: 1; }
+    input[type="range"] { vertical-align: middle; accent-color: var(--accent); }
+
+    #log {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .message {
+      max-width: min(680px, 85%);
+      padding: 8px 12px;
+      border-radius: 10px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .user { align-self: flex-end; background: var(--user); }
+    .bot { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+    .bot.typing::after {
+      content: "\258C";
+      color: var(--accent);
+      animation: blink 1s steps(1) infinite;
+    }
+
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .hint {
+      align-self: center;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .example {
+      margin: 0 6px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--accent);
+      font: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    form {
+      display: flex;
+      gap: 8px;
+      padding: 12px 16px;
+      border-top: 1px solid var(--border);
+    }
+
+    #question {
+      flex: 1;
+      min-width: 0;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      outline: none;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+    }
+
+    #question:focus { border-color: var(--accent); }
+
+    .button {
+      padding: 10px 16px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #04130b;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .button:disabled { opacity: .4; cursor: default; }
+    .button.ghost {
+      padding: 6px 10px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--muted);
+      font-weight: 400;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>TINY 2.1</h1>
+    <small>367,000 parameters · responds in English</small>
+    <a href="{{ url_for('api_docs') }}">API guide</a>
+    <span class="spacer"></span>
+    <label>
+      Creativity
+      <input id="creativity" type="range" min="0" max="9" value="5">
+      <b id="creativity-value">5</b>
+    </label>
+    <button class="button ghost" id="clear" type="button">Clear</button>
+  </header>
+
+  <main id="log" aria-live="polite">
+    <div class="hint">
+      TINY knows about 3,500 facts (countries, elements, animals, simple math…)
+      and confidently makes things up when it doesn't know.<br>Try:
+      <button class="example" type="button">what is the capital of peru</button>
+      <button class="example" type="button">what is 7 times 8</button>
+      <button class="example" type="button">is a whale a fish</button>
+      <button class="example" type="button">spell elephant</button>
+      <button class="example" type="button">opposite of hot</button>
+    </div>
+  </main>
+
+  <form id="chat-form" autocomplete="off">
+    <input id="question" maxlength="72" placeholder="Ask a question in English…" autofocus>
+    <button class="button" id="send" type="submit">Send</button>
+  </form>
+
+  <script>
+    const form = document.getElementById('chat-form');
+    const question = document.getElementById('question');
+    const send = document.getElementById('send');
+    const creativity = document.getElementById('creativity');
+    const creativityValue = document.getElementById('creativity-value');
+    const log = document.getElementById('log');
+    const history = [];
+    let historyIndex = -1;
+
+    creativity.addEventListener('input', () => {
+      creativityValue.textContent = creativity.value;
+    });
+
+    document.getElementById('clear').addEventListener('click', () => {
+      log.querySelectorAll('.message').forEach(message => message.remove());
+    });
+
+    document.querySelectorAll('.example').forEach(example => {
+      example.addEventListener('click', () => {
+        question.value = example.textContent;
+        question.focus();
+      });
+    });
+
+    function addMessage(className, text) {
+      const message = document.createElement('div');
+      message.className = `message ${className}`;
+      message.textContent = text;
+      log.appendChild(message);
+      log.scrollTop = log.scrollHeight;
+      return message;
+    }
+
+    question.addEventListener('keydown', event => {
+      if (event.key === 'ArrowUp' && history.length) {
+        historyIndex = Math.min(historyIndex + 1, history.length - 1);
+        question.value = history[history.length - 1 - historyIndex];
+        event.preventDefault();
+      } else if (event.key === 'ArrowDown') {
+        historyIndex = Math.max(historyIndex - 1, -1);
+        question.value = historyIndex < 0 ? '' : history[history.length - 1 - historyIndex];
+        event.preventDefault();
+      }
+    });
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+
+      const text = question.value.trim();
+      if (!text || send.disabled) return;
+
+      history.push(text);
+      historyIndex = -1;
+      question.value = '';
+      addMessage('user', text);
+      const bot = addMessage('bot typing', '');
+      send.disabled = true;
+
+      try {
+        const response = await fetch("{{ url_for('ask') }}", {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            q: text,
+            creativity: Number(creativity.value)
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error(`Request failed: ${response.status} ${response.statusText}`);
+        }
+        if (!response.body) {
+          throw new Error('This browser does not support streamed responses.');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        for (;;) {
+          const result = await reader.read();
+          if (result.done) break;
+          bot.textContent += decoder.decode(result.value, {stream: true});
+          log.scrollTop = log.scrollHeight;
+        }
+        bot.textContent += decoder.decode();
+
+        if (!bot.textContent) bot.textContent = '(no answer)';
+      } catch (error) {
+        bot.textContent = `Error: ${error.message}`;
+      } finally {
+        bot.classList.remove('typing');
+        send.disabled = false;
+        question.focus();
+      }
+    });
+  </script>
+</body>
+</html>
